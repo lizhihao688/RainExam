@@ -34,6 +34,21 @@ fi
 PY_VERSION=$($PYTHON --version 2>&1)
 echo "[1/4] ✅ $PY_VERSION"
 
+# 检查 Python 版本 >= 3.10
+PY_MAJOR=$(echo "$PY_VERSION" | sed -n 's/Python \([0-9]*\)\.\([0-9]*\).*/\1/p')
+PY_MINOR=$(echo "$PY_VERSION" | sed -n 's/Python \([0-9]*\)\.\([0-9]*\).*/\2/p')
+if [ -z "$PY_MAJOR" ] || [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
+    echo "      ❌ 需要 Python 3.10+，当前版本: $PY_VERSION"
+    echo ""
+    echo "  请升级 Python："
+    echo "    macOS:   brew install python@3.12"
+    echo "    Ubuntu:  sudo apt install python3.12 python3.12-pip"
+    echo "    或从 https://www.python.org/downloads/ 下载"
+    echo ""
+    read -p "按回车键退出..."
+    exit 1
+fi
+
 # ===== 2. 检查/安装依赖 =====
 echo "[2/4] 🔍 检查依赖..."
 if $PYTHON -c "import openai, httpx" 2>/dev/null; then
@@ -95,7 +110,7 @@ while true; do
 
     echo ""
     if [ $? -eq 0 ]; then
-        echo "✅ 运行完成！请查看生成的 questions.txt 文件"
+        echo "✅ 运行完成！请查看生成的 answer.txt 文件"
     else
         echo "❌ 运行出错，请检查上面的错误信息"
     fi

@@ -203,9 +203,14 @@ def extract_questions(json_path: str) -> list[dict]:
     # 1. 读取文件
     with open(json_path, "r", encoding="utf-8") as f:
         root = json.load(f)
+    if root.get("errcode")!=0:
+        print("❌ API 返回错误: "+root.get("errmsg"))
+        print("  请检查 cookie，并更新")
+        sys.exit(1)
 
     # 2. 获取题目列表（空值安全）
     data = root.get("data")
+    
     problems = data.get("problems") if data else []
     if problems is None:
         problems = []
@@ -397,10 +402,15 @@ def answer_questions(
 
             if parsed:
                 results[i] = parsed
-                print(
-                    f"  {progress} ✅ {parsed['answer']} - "
-                    f"{q['question']}"
+                opts_str = "  ".join(
+                    f"{o['key']}. {o['value']}" for o in q.get("options", [])
                 )
+                info = f"{q['question']}  {opts_str}" if opts_str else q["question"]
+                print(
+                    f"  {progress} ✅ {parsed['answer']} - {info}"
+                )
+                if parsed.get("explanation"):
+                    print(f"          💡 {parsed['explanation']}")
             else:
                 print(
                     f"  {progress} ⚠️  无法解析 AI 响应，原始内容:\n    {content[:200]}"
@@ -496,7 +506,7 @@ def write_pages(
         lines.append("═" * 55)
 
     content = "\n".join(lines)
-    out_path = os.path.join(output_dir, "../questions.txt")
+    out_path = os.path.join(output_dir, "answer.txt")
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(content)
