@@ -82,7 +82,7 @@ echo.
 echo 请选择模式：
 echo   1. 仅提取题目
 echo   2. 提取 + AI 解答
-choice /c 12 /n /m "请按 1 或 2（默认 1）："
+choice /c 12 /n /m "请按 1 或 2："
 if !errorlevel! equ 2 (
     set MODE_FLAG=--answer
     echo   📝 模式：提取 + AI 解答
@@ -98,7 +98,7 @@ echo   试卷 ID: %EXAM_ID%
 echo ============================================
 echo.
 
-python extract_questions.py --exam-id %EXAM_ID% !MODE_FLAG!
+python src/extract_questions.py --exam-id %EXAM_ID% !MODE_FLAG!
 
 echo.
 if !errorlevel! equ 0 (

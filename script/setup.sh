@@ -79,7 +79,7 @@ while true; do
     echo "请选择模式："
     echo "  1) 仅提取题目"
     echo "  2) 提取 + AI 解答"
-    read -p "请输入 1 或 2（默认 1）: " MODE
+    read -p "请输入 1 或 2: " MODE
 
     MODE_FLAG=""
     [ "$MODE" = "2" ] && MODE_FLAG="--answer"
@@ -91,7 +91,7 @@ while true; do
     echo "============================================"
     echo ""
 
-    $PYTHON extract_questions.py --exam-id "$EXAM_ID" $MODE_FLAG
+    $PYTHON src/extract_questions.py --exam-id "$EXAM_ID" $MODE_FLAG
 
     echo ""
     if [ $? -eq 0 ]; then
