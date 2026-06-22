@@ -28,8 +28,7 @@ import re
 import sys
 from pathlib import Path
 
-# 每 10 题一个文件
-PAGE_SIZE = 50
+
 
 # AI 默认配置
 DEFAULT_AI_MODEL = "gpt-4o-mini"
@@ -221,6 +220,7 @@ def extract_questions(json_path: str) -> list[dict]:
         problem_type = problem.get("Type", "")
         is_judgement = problem_type == "Judgement" or problem.get("ProblemType") == 6
         is_fillblank = problem_type == "FillBlank" or problem.get("ProblemType") == 4
+        is_shortanswer = problem_type == "ShortAnswer" or problem.get("ProblemType") == 5
 
         # 提取题干（去 HTML，填空的 [填空1] 保留）
         body = problem.get("Body", "")
@@ -232,7 +232,8 @@ def extract_questions(json_path: str) -> list[dict]:
         opt_arr = problem.get("Options")
         option_list: list[dict] = []
 
-        if opt_arr and isinstance(opt_arr, list) and not is_fillblank:
+        has_options = opt_arr and isinstance(opt_arr, list) and not is_fillblank and not is_shortanswer
+        if has_options:
             if is_judgement:
                 # 判断题：保留 true/false 语义，映射为 T/F
                 for opt in opt_arr:
@@ -267,7 +268,12 @@ def extract_questions(json_path: str) -> list[dict]:
                     })
 
         # 组装题目
-        qtype = "fillblank" if is_fillblank else ("judgement" if is_judgement else "choice")
+        qtype = (
+            "fillblank" if is_fillblank else
+            "shortanswer" if is_shortanswer else
+            "judgement" if is_judgement else
+            "choice"
+        )
         all_questions.append({
             "question": question_text,
             "options": option_list,
@@ -314,6 +320,9 @@ def _build_answer_prompt(question: dict, index: int) -> str:
     elif qtype == "fillblank":
         lines.append("\n这是一道填空题，请填写 [填空] 处的内容。以 JSON 格式回复：")
         lines.append('{"answer": "你的答案", "explanation": "简要解释"}')
+    elif qtype == "shortanswer":
+        lines.append("\n这是一道问答题，请根据题目内容作答。以 JSON 格式回复：")
+        lines.append('{"answer": "你的完整回答", "explanation": "补充说明或依据"}')
     else:
         lines.append("\n请选择正确的答案，并以 JSON 格式回复（仅输出 JSON，不要其它内容）：")
         lines.append('{"answer": "A", "explanation": "简要解释为什么选这个"}')
@@ -417,104 +426,82 @@ def write_pages(
     answers: list[dict | None] | None = None,
 ):
     """
-    将题目按 PAGE_SIZE 分组写入 TXT 文件
+    将所有题目写入一个 TXT 文件
 
     如果提供了 answers，会将答案内联写入每题之后，并在文件末尾生成答案速查表
     """
     total = len(all_questions)
-    file_index = 1
+    lines: list[str] = []
 
-    for start in range(0, total, PAGE_SIZE):
-        end = min(start + PAGE_SIZE, total)
-        page = all_questions[start:end]
-        page_answers = answers[start:end] if answers else None
+    # ── 每题内容 + 答案（如有） ──
+    for i, q in enumerate(all_questions):
+        idx = i + 1
+        a = answers[i] if answers else None
 
-        lines: list[str] = []
+        lines.append(f"题目 {idx}")
+        lines.append(q["question"])
 
-        # ── 每题内容 + 答案（如有） ──
-        for i, q in enumerate(page):
-            idx = start + i + 1
-            a = page_answers[i] if page_answers else None
+        opts = q.get("options", [])
+        if opts:
+            for opt in opts:
+                key = opt["key"]
+                val = opt["value"]
+                marker = ""
+                if a is not None:
+                    if a is None:
+                        marker = "  ❌"
+                    elif a.get("answer") == key:
+                        marker = "  ← ✅"
+                lines.append(f"{key}. {val}{marker}")
 
-            lines.append(f"题目 {idx}")
-            lines.append(q["question"])
-
-            opts = q.get("options", [])
-            if opts:
-                for opt in opts:
-                    key = opt["key"]
-                    val = opt["value"]
-                    marker = ""
-                    if a is not None:
-                        if a is None:
-                            marker = "  ❌"
-                        elif a.get("answer") == key:
-                            marker = "  ← ✅"
-                    lines.append(f"{key}. {val}{marker}")
-
-            # 答案行
-            lines.append("")
-            if a is not None:
-                if a is None:
-                    lines.append("📌 解答失败")
-                else:
-                    answer_text = a["answer"]
-                    lines.append(f"📌 答案：{answer_text}")
-                    if a.get("explanation"):
-                        lines.append(f"💡 解析：{a['explanation']}")
-            lines.append("")
-
-        # ── 文件末尾：答案速查表（如有） ──
-        if page_answers:
-            lines.append("═" * 55)
-            lines.append(f"📋 答案速查（第 {start + 1}-{end} 题）")
-            lines.append("═" * 55)
-
-            # 根据题型选择列宽
-            is_fillblank = any(q.get("type") == "fillblank" for q in page)
-            if is_fillblank:
-                # 填空题：题号 + 答案文本
-                row_parts: list[str] = []
-                for i, (q, a) in enumerate(zip(page, page_answers)):
-                    idx = start + i + 1
-                    if a is not None:
-                        text = a["answer"]
-                    else:
-                        text = "?"
-                    lines.append(f"  {idx:>3}: {text}")
+        # 答案行
+        lines.append("")
+        if a is not None:
+            if a is None:
+                lines.append("📌 解答失败")
             else:
-                # 选择/判断题：紧凑的表格布局
-                row_parts = []
-                items_in_row = 0
-                for i, (q, a) in enumerate(zip(page, page_answers)):
-                    idx = start + i + 1
-                    if a is not None:
-                        text = a["answer"]
-                    else:
-                        text = "?"
-                    row_parts.append(f"{idx:>3}: {text}")
-                    items_in_row += 1
-                    if items_in_row >= 5:
-                        lines.append("  " + "    ".join(row_parts))
-                        row_parts = []
-                        items_in_row = 0
-                if row_parts:
+                answer_text = a["answer"]
+                lines.append(f"📌 答案：{answer_text}")
+                if a.get("explanation"):
+                    lines.append(f"💡 解析：{a['explanation']}")
+        lines.append("")
+
+    # ── 文件末尾：答案速查表（如有） ──
+    if answers:
+        lines.append("═" * 55)
+        lines.append(f"📋 答案速查（共 {total} 题）")
+        lines.append("═" * 55)
+
+        is_text_answer = any(q.get("type") in ("fillblank", "shortanswer") for q in all_questions)
+        if is_text_answer:
+            for i, (q, a) in enumerate(zip(all_questions, answers)):
+                idx = i + 1
+                text = a["answer"] if a is not None else "?"
+                lines.append(f"  {idx:>3}: {text}")
+        else:
+            row_parts: list[str] = []
+            items_in_row = 0
+            for i, (q, a) in enumerate(zip(all_questions, answers)):
+                idx = i + 1
+                text = a["answer"] if a is not None else "?"
+                row_parts.append(f"{idx:>3}: {text}")
+                items_in_row += 1
+                if items_in_row >= 5:
                     lines.append("  " + "    ".join(row_parts))
+                    row_parts = []
+                    items_in_row = 0
+            if row_parts:
+                lines.append("  " + "    ".join(row_parts))
 
-            lines.append("═" * 55)
+        lines.append("═" * 55)
 
-        content = "\n".join(lines)
+    content = "\n".join(lines)
+    out_path = os.path.join(output_dir, "questions.txt")
 
-        out_name = f"questions_{file_index}.txt"
-        out_path = os.path.join(output_dir, out_name)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(content)
 
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-        print(f"  成功写入：{os.path.abspath(out_path)}  题目数：{len(page)}")
-        file_index += 1
-
-    return file_index - 1  # 返回文件总数
+    print(f"  成功写入：{os.path.abspath(out_path)}  共 {total} 道题")
 
 
 # ──────────────────────────────────────────────

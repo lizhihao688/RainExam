@@ -13,6 +13,5 @@ __pycache__/
 .idea/
 
 # 生成的文件
-questions_*.txt
-answers_*.txt
+questions.txt
 exam_*.json
