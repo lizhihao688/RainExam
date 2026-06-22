@@ -1,0 +1,12 @@
+[project]
+name = "rainexam"
+version = "0.1.0"
+description = "雨课堂在线考题提取 & AI 自动解答工具"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+    "httpx>=0.27.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/lizhihao07/rainexam"
