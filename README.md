@@ -44,13 +44,14 @@ python extract_questions.py --exam-id 4361438 --answer  # 提取 + AI 解答
 ## Cookie 获取方式
 
 1. 用浏览器打开雨课堂在线考试页面（**先登录**）
+2. 进入试卷详情
 2. 按 **F12** → **Network** 标签 → 按 **F5** 刷新
-3. 点击任意请求 → 复制 `Cookie` 的值
+3. 点击show_paper请求 → 复制 `Cookie` 的值
 4. 粘贴到 `.env` 文件中的 `XT_COOKIE=` 后面
-![img_1.png](static/img.png)
+![img.png](static/cookie.png)
 ## 试卷ID获取方式
 进入试卷页面可以从网址中看到
-![img.png](img.png)
+![img.png](static/exam_id.png)
 
 
 ---
