@@ -1,0 +1,17 @@
+# 配置文件（包含敏感信息，禁止提交）
+.env
+.env.local
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 虚拟环境
+.venv/
+
+# IDE
+.idea/
+
+# 生成的文件
+questions.txt
+exam_*.json
