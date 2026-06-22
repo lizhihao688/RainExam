@@ -433,6 +433,7 @@ def answer_questions(
 def write_pages(
     all_questions: list[dict],
     output_dir: str,
+    exam_id: int,
     answers: list[dict | None] | None = None,
 ):
     """
@@ -506,7 +507,7 @@ def write_pages(
         lines.append("═" * 55)
 
     content = "\n".join(lines)
-    out_path = os.path.join(output_dir, "answer.txt")
+    out_path = os.path.join(output_dir, f"answer_{exam_id}.txt")
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -668,7 +669,7 @@ def main():
         output_dir = os.path.dirname(os.path.abspath(json_path))
         label = "含答案的题目文件" if answers else "题目文件"
         print(f"\n📝 正在写入{label}...")
-        write_pages(all_questions, output_dir, answers)
+        write_pages(all_questions, output_dir, args.exam_id, answers)
 
         print(f"\n{'='*50}")
         print(f"✅ 全部完成！共 {len(all_questions)} 道题")
