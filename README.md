@@ -48,6 +48,8 @@ python extract_questions.py --exam-id 4361438 --answer  # 提取 + AI 解答
 2. 按 **F12** → **Network** 标签 → 按 **F5** 刷新
 3. 点击show_paper请求 → 复制 `Cookie` 的值
 4. 粘贴到 `.env` 文件中的 `XT_COOKIE=` 后面
+#⚠️注意：
+雨课堂会为每张试卷生成不同的Token，意味着你每次使用本项目提取试题时都需要更新Cookie
 ![img.png](static/cookie.png)
 ## 试卷ID获取方式
 进入试卷页面可以从网址中看到

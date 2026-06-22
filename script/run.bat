@@ -25,7 +25,29 @@ if !errorlevel! neq 0 (
     pause
     exit /b 1
 )
-for /f "tokens=*" %%i in ('python --version 2^>nul') do echo [1/4] ✅ %%i
+for /f "tokens=*" %%i in ('python --version 2^>nul') do (
+    echo [1/4] ✅ %%i
+    rem 提取版本号（例如 Python 3.9.18 → 3.9）
+    for /f "tokens=2 delims= " %%v in ("%%i") do set PY_VER=%%v
+)
+rem 检查版本 >= 3.10
+for /f "tokens=1,2 delims=." %%a in ("%PY_VER%") do (
+    if %%a LSS 3 (
+        set PY_BAD=1
+    ) else if %%a EQU 3 if %%b LSS 10 (
+        set PY_BAD=1
+    )
+)
+if defined PY_BAD (
+    echo.
+    echo ❌ 需要 Python 3.10+，当前版本: %PY_VER%
+    echo.
+    echo   请从 https://www.python.org/downloads/ 下载最新版
+    echo   安装时务必勾选「Add Python to PATH」
+    echo.
+    pause
+    exit /b 1
+)
 
 rem ===== 2. 安装依赖 =====
 echo [2/4] 🔍 检查依赖...
@@ -102,7 +124,7 @@ python src/extract_questions.py --exam-id %EXAM_ID% !MODE_FLAG!
 
 echo.
 if !errorlevel! equ 0 (
-    echo ✅ 运行完成！请查看生成的 questions.txt 文件
+    echo ✅ 运行完成！请查看生成的 answer.txt 文件
 ) else (
     echo ❌ 运行出错，请检查上面的错误信息
 )
