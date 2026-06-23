@@ -75,8 +75,8 @@ python extract_questions.py --exam-id 4361438 --answer  # 提取 + AI 解答
 ```ini
 XT_COOKIE=xt_lang=zh; x_access_token=...    # 必需
 AI_API_KEY=sk-xxx                            # AI 解答时必需
-AI_BASE_URL=https://api.deepseek.com/v1       # 可选，默认 OpenAI
-AI_MODEL=deepseek-chat                        # 可选，默认 gpt-4o-mini
+AI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1       # AI 解答时必需
+AI_MODEL=qwen3.6-flash                        # AI 解答时必需
 ```
 
 ---

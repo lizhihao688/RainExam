@@ -507,7 +507,10 @@ def write_pages(
         lines.append("═" * 55)
 
     content = "\n".join(lines)
-    out_path = os.path.join(output_dir, f"answer_{exam_id}.txt")
+    file_name = f"questions_{exam_id}.txt"
+    if answers:
+        file_name = f"answers_{exam_id}.txt"
+    out_path = os.path.join(output_dir, file_name)
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(content)
