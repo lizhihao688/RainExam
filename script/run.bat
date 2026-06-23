@@ -124,7 +124,7 @@ python src/extract_questions.py --exam-id %EXAM_ID% !MODE_FLAG!
 
 echo.
 if !errorlevel! equ 0 (
-    echo ✅ 运行完成！请查看生成的 answer.txt 文件
+    echo ✅ 运行完成！请查看生成的 txt 文件
 ) else (
     echo ❌ 运行出错，请检查上面的错误信息
 )
