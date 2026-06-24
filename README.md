@@ -8,14 +8,26 @@
 
 ## 一分钟上手
 
-### 🪟 Windows
+### 🪟 Windows（推荐：直接下载 EXE）
+
+> **无需安装 Python**，下载即用！
+
+1. 前往 [Releases 页面](../../releases/latest) 下载最新版 `RainExam.exe`
+2. 双击运行，会弹出图形界面
+3. 在界面中填入 **XT_COOKIE** 和 **试卷 ID**，点击「保存配置」再点「开始运行」
+
+![GUI 界面示意](static/exam_id.png)
+
+<details>
+<summary>🔧 旧方式：通过 run.bat 运行（需要已安装 Python）</summary>
 
 ```
 ① 下载本项目的 ZIP 并解压
-② 双击 run.bat                    ← 脚本自动检查环境、装依赖、引导配置
-③ 第一次运行时会提示填入 Cookie    ← 按 F12 从浏览器复制粘贴即可
-④ 输入试卷 ID，回车，搞定！
+② 双击 script/run.bat
+③ 第一次运行时会提示填入 Cookie
+④ 输入试卷 ID，回车
 ```
+</details>
 
 ### 🍎 macOS
 
