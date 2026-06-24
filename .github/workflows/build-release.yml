@@ -56,19 +56,39 @@ jobs:
           body: |
             ## RainExam ${{ github.ref_name }}
 
-            ### 下载使用
-            1. 下载下方的 `RainExam.exe`
-            2. 双击运行，**无需安装 Python**
-            3. 在界面中填写雨课堂 Cookie 和试卷 ID，点击「开始运行」
+            ---
 
-            ### 如何获取 Cookie
-            1. 登录 [雨课堂在线](https://examination.xuetangx.com)，进入考试页面
-            2. 按 `F12` → `Network` → 刷新页面
-            3. 点击任意请求 → 复制 `Cookie` 请求头的值
-            4. 粘贴到程序界面的 XT_COOKIE 输入框
+            ## ⬇️ 下载方式
 
-            ### 更新说明
-            > 详见 [CHANGELOG](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }})
+            > ⚠️ **注意**：页面底部有多个文件，请下载 **`RainExam.exe`**，不要下载 `Source code.zip`（那是源码，不是程序）
+
+            | 文件 | 说明 |
+            |------|------|
+            | ✅ **`RainExam.exe`** | **点这个下载！** Windows 可执行程序，双击运行 |
+            | ❌ `Source code.zip` | 源代码压缩包，普通用户不需要 |
+            | ❌ `Source code.tar.gz` | 源代码压缩包，普通用户不需要 |
+
+            ---
+
+            ## 🚀 使用步骤
+
+            1. 下载 **`RainExam.exe`**（约 30~50 MB）
+            2. 双击运行，**无需安装 Python 或任何软件**
+            3. 在界面中填写 **XT_COOKIE** 和 **试卷 ID**
+            4. 点击「保存配置」→「开始运行」
+
+            ## 🍪 如何获取 Cookie
+
+            1. 用浏览器登录 [雨课堂在线](https://examination.xuetangx.com)，进入考试页面
+            2. 按 `F12` → `Network` 标签 → 按 `F5` 刷新页面
+            3. 点击任意请求 → 找到 `Cookie` 请求头 → 复制完整内容
+            4. 粘贴到程序界面的 `XT_COOKIE` 输入框，点「保存配置」
+
+            > ⚠️ 雨课堂每张试卷会生成独立 Token，每次使用需重新获取 Cookie
+
+            ---
+
+            > 详见 [提交记录](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }})
           files: dist/RainExam.exe
           draft: false
           prerelease: false
