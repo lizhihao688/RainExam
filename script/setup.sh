@@ -3,12 +3,17 @@
 
 set -e
 
+# 计算项目根目录（setup.sh 在 script/ 目录下，上一级是根目录）
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 clear
 echo "============================================"
 echo "       🌧️  RainExam — 一键设置 + 运行"
 echo "       雨课堂在线考题提取 & AI 解答工具"
 echo "============================================"
 echo ""
+echo "  项目目录: $PROJECT_ROOT"
 
 # ===== 1. 检查 Python =====
 PYTHON=""
@@ -61,8 +66,8 @@ fi
 
 # ===== 3. 检查/创建 .env =====
 echo "[3/4] 🔧 检查配置文件..."
-if [ ! -f ".env" ]; then
-    cp .env.example .env
+if [ ! -f "$PROJECT_ROOT/.env" ]; then
+    cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env"
     echo "      ⚠️  已自动创建 .env 文件"
     echo ""
     echo "  ╔══════════════════════════════════════════════╗"
@@ -106,7 +111,7 @@ while true; do
     echo "============================================"
     echo ""
 
-    $PYTHON src/extract_questions.py --exam-id "$EXAM_ID" $MODE_FLAG
+    cd "$PROJECT_ROOT" && $PYTHON src/extract_questions.py --exam-id "$EXAM_ID" $MODE_FLAG
 
     echo ""
     if [ $? -eq 0 ]; then

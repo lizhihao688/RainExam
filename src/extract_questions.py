@@ -14,10 +14,10 @@
     cp .env.example .env
 
 环境变量配置（也可写在 .env 文件中）:
-    AI_API_KEY / OPENAI_API_KEY    AI API Key（--answer 时需要）
-    AI_BASE_URL                    AI API 地址（默认: https://api.openai.com/v1）
-    AI_MODEL                       AI 模型名称（默认: gpt-4o-mini）
-    XT_COOKIE                      雨课堂在线 Cookie（--fetch 模式必需）
+    AI_API_KEY / OPENAI_API_KEY    
+    AI_BASE_URL                    
+    AI_MODEL                       
+    XT_COOKIE                      
 """
 
 import argparse
