@@ -1,33 +1,37 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 title RainExam - 一键提取雨课堂在线考题
 
 setlocal enabledelayedexpansion
 
+rem 计算项目根目录（run.bat 在 script\ 目录下，上一级是根目录）
+for %%i in ("%~dp0..") do set "PROJECT_ROOT=%%~fi"
+
 cls
 echo ============================================
-echo        🌧️  RainExam — 一键设置 + 运行
-echo        雨课堂在线考题提取 ^& AI 解答工具
+echo   [RainExam] 一键设置 + 运行
+echo   雨课堂在线考题提取 ^& AI 解答工具
 echo ============================================
 echo.
+echo   项目目录: !PROJECT_ROOT!
 
 rem ===== 1. 检查 Python =====
 python --version >nul 2>&1
 if !errorlevel! neq 0 (
-    echo [1/4] ⚠️  未检测到 Python，正在尝试安装...
+    echo [1/4] [!] 未检测到 Python，正在尝试安装...
     echo.
     echo   正在打开 Python 下载页面，请按以下步骤操作：
-    echo     ① 下载最新版 Python
-    echo     ② 安装时务必勾选「Add Python to PATH」
-    echo     ③ 安装完成后关掉本窗口，重新双击 run.bat
+    echo   1. 下载最新版 Python
+    echo   2. 安装时务必勾选「Add Python to PATH」
+    echo   3. 安装完成后关掉本窗口，重新双击 run.bat
     echo.
     start https://www.python.org/downloads/
     pause
     exit /b 1
 )
 for /f "tokens=*" %%i in ('python --version 2^>nul') do (
-    echo [1/4] ✅ %%i
-    rem 提取版本号（例如 Python 3.9.18 → 3.9）
+    echo [1/4] [OK] %%i
+    rem 提取版本号（例如 Python 3.9.18 -> 3.9）
     for /f "tokens=2 delims= " %%v in ("%%i") do set PY_VER=%%v
 )
 rem 检查版本 >= 3.10
@@ -40,7 +44,7 @@ for /f "tokens=1,2 delims=." %%a in ("%PY_VER%") do (
 )
 if defined PY_BAD (
     echo.
-    echo ❌ 需要 Python 3.10+，当前版本: %PY_VER%
+    echo [X] 需要 Python 3.10+，当前版本: %PY_VER%
     echo.
     echo   请从 https://www.python.org/downloads/ 下载最新版
     echo   安装时务必勾选「Add Python to PATH」
@@ -50,49 +54,49 @@ if defined PY_BAD (
 )
 
 rem ===== 2. 安装依赖 =====
-echo [2/4] 🔍 检查依赖...
+echo [2/4] [*] 检查依赖...
 python -c "import openai, httpx" >nul 2>&1
 if !errorlevel! neq 0 (
     echo   正在安装 openai、httpx...
     pip install openai httpx -q
     if !errorlevel! neq 0 (
-        echo ❌ 安装失败，请检查网络后重试
+        echo [X] 安装失败，请检查网络后重试
         pause
         exit /b 1
     )
-    echo   ✅ 依赖安装完成
+    echo   [OK] 依赖安装完成
 ) else (
-    echo   ✅ 依赖已就绪
+    echo   [OK] 依赖已就绪
 )
 
 rem ===== 3. 检查/创建 .env =====
-echo [3/4] 🔧 检查配置文件...
-if not exist ".env" (
-    copy .env.example .env >nul
-    echo   ⚠️  已自动创建 .env 文件
+echo [3/4] [*] 检查配置文件...
+if not exist "!PROJECT_ROOT!\.env" (
+    copy "!PROJECT_ROOT!\.env.example" "!PROJECT_ROOT!\.env" >nul
+    echo   [!] 已自动创建 .env 文件
     echo.
-    echo   ╔══════════════════════════════════════════════╗
-    echo   ║  重要！请用记事本打开 .env 文件              ║
-    echo   ║  填入你的雨课堂在线 Cookie 后才能使用          ║
-    echo   ║                                              ║
-    echo   ║  如何在浏览器获取 Cookie：                    ║
-    echo   ║  ① 登录雨课堂在线，进入考试页面               ║
-    echo   ║  ② 按 F12 → Network → 刷新页面             ║
-    echo   ║  ③ 点击任意请求 → 复制 Cookie 值            ║
-    echo   ║  ④ 粘贴到 .env 的 XT_COOKIE= 后面          ║
-    echo   ╚══════════════════════════════════════════════╝
+    echo   +----------------------------------------------------+
+    echo   | 重要！请用记事本打开 .env 文件                      |
+    echo   | 填入你的雨课堂在线 Cookie 后才能使用                |
+    echo   |                                                    |
+    echo   | 如何在浏览器获取 Cookie：                           |
+    echo   | 1. 登录雨课堂在线，进入考试页面                    |
+    echo   | 2. 按 F12 - Network - 刷新页面                    |
+    echo   | 3. 点击任意请求 - 复制 Cookie 值                   |
+    echo   | 4. 粘贴到 .env 的 XT_COOKIE= 后面                 |
+    echo   +----------------------------------------------------+
     echo.
     pause
-    start notepad .env
+    start notepad "!PROJECT_ROOT!\.env"
     echo.
     echo   编辑完 .env 后，按任意键继续...
     pause >nul
 ) else (
-    echo   ✅ .env 配置文件就绪
+    echo   [OK] .env 配置文件就绪
 )
 
 rem ===== 4. 运行 =====
-echo [4/4] 🚀 准备运行...
+echo [4/4] [*] 准备运行...
 echo.
 
 :input_id
@@ -107,10 +111,10 @@ echo   2. 提取 + AI 解答
 choice /c 12 /n /m "请按 1 或 2："
 if !errorlevel! equ 2 (
     set MODE_FLAG=--answer
-    echo   📝 模式：提取 + AI 解答
+    echo   [*] 模式：提取 + AI 解答
 ) else (
     set MODE_FLAG=
-    echo   📝 模式：仅提取题目
+    echo   [*] 模式：仅提取题目
 )
 
 cls
@@ -120,13 +124,13 @@ echo   试卷 ID: %EXAM_ID%
 echo ============================================
 echo.
 
-python src/extract_questions.py --exam-id %EXAM_ID% !MODE_FLAG!
+cd /d "!PROJECT_ROOT!" && python src/extract_questions.py --exam-id %EXAM_ID% !MODE_FLAG!
 
 echo.
 if !errorlevel! equ 0 (
-    echo ✅ 运行完成！请查看生成的 txt 文件
+    echo [OK] 运行完成！请查看生成的 answer.txt 文件
 ) else (
-    echo ❌ 运行出错，请检查上面的错误信息
+    echo [X] 运行出错，请检查上面的错误信息
 )
 echo.
 pause
