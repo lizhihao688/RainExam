@@ -12,11 +12,10 @@
 
 > **无需安装 Python**，下载即用！
 
-1. 前往 [Releases 页面](../../releases/latest) 下载最新版 `RainExam.exe`
-2. 双击运行，会弹出图形界面
-3. 在界面中填入 **XT_COOKIE** 和 **试卷 ID**，点击「保存配置」再点「开始运行」
-
-![GUI 界面示意](static/exam_id.png)
+1. 前往 [Releases 页面](../../releases/latest)
+2. 找到 **Assets** 区域，点击 **`RainExam.exe`** 下载（⚠️ 不要下载 `Source code.zip`，那是源码）
+3. 双击运行，会弹出图形界面
+4. 在界面中填入 **XT_COOKIE** 和 **试卷 ID**，点击「保存配置」再点「开始运行」
 
 <details>
 <summary>🔧 旧方式：通过 run.bat 运行（需要已安装 Python）</summary>
