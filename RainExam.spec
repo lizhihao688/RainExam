@@ -26,6 +26,11 @@ a = Analysis(
         'tkinter.ttk',
         'tkinter.scrolledtext',
         'tkinter.messagebox',
+        # pywebview 在 Windows 上使用 edgechromium 后端
+        'webview',
+        'webview.platforms.edgechromium',
+        'webview.platforms.winforms',
+        'clr',
     ],
     hookspath=[],
     hooksconfig={},
