@@ -1,6 +1,7 @@
 """
 RainExam GUI 入口
 - 基于 tkinter（Python 内置，无需额外依赖）
+- 支持通过内嵌浏览器（pywebview）自动获取雨课堂 Cookie
 - 替代 run.bat，Windows 用户直接双击 RainExam.exe 运行
 """
 
@@ -49,7 +50,6 @@ def save_env(env_path: Path, data: dict):
     lines = []
     written_keys = set()
 
-    # 更新已存在的 key
     if env_path.is_file():
         with open(env_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -62,13 +62,85 @@ def save_env(env_path: Path, data: dict):
                         continue
                 lines.append(line)
 
-    # 追加新 key
     for key, val in data.items():
         if key not in written_keys:
             lines.append(f'{key}={val}\n')
 
     with open(env_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
+
+
+# ──────────────────────────────────────────────
+# Cookie 自动获取（pywebview）
+# ──────────────────────────────────────────────
+
+# 雨课堂登录入口页（进入后跳转考试系统）
+_XT_LOGIN_URL = "https://passport.yuketang.cn/user-fe/login?next=https://examination.xuetangx.com"
+
+# 登录成功标志：Cookie 中包含 x_access_token
+_LOGIN_COOKIE_KEY = "x_access_token"
+
+# 轮询检测登录的 JS（注入到页面中）
+_POLL_JS = """
+(function startLoginPoll() {
+    var timer = setInterval(function() {
+        var cookies = document.cookie;
+        if (cookies.indexOf('x_access_token') !== -1) {
+            clearInterval(timer);
+            window.pywebview.api.on_login_detected(cookies);
+        }
+    }, 800);
+})();
+"""
+
+
+def open_login_browser(callback):
+    """
+    在独立线程里打开 pywebview 浏览器窗口，用户登录后自动回调 callback(cookie_str)。
+    callback 在 pywebview 线程中被调用，需自行切换到主线程（通过 tkinter.after）。
+    """
+    try:
+        import webview
+    except ImportError:
+        callback(None, error="未安装 pywebview，请先执行: pip install pywebview")
+        return
+
+    class Api:
+        """暴露给 JS 调用的 Python 对象"""
+        def __init__(self):
+            self._window = None
+
+        def set_window(self, w):
+            self._window = w
+
+        def on_login_detected(self, cookies: str):
+            """JS 检测到登录成功后调用此方法"""
+            callback(cookies, error=None)
+            # 延迟关闭窗口，避免 JS 调用还没返回就销毁
+            if self._window:
+                threading.Timer(0.5, self._window.destroy).start()
+
+    api = Api()
+    window = webview.create_window(
+        title="登录雨课堂 - 登录成功后窗口将自动关闭",
+        url=_XT_LOGIN_URL,
+        js_api=api,
+        width=1024,
+        height=700,
+    )
+    api.set_window(window)
+
+    def on_loaded():
+        # 每次页面加载完成后注入轮询脚本
+        try:
+            window.evaluate_js(_POLL_JS)
+        except Exception:
+            pass
+
+    window.events.loaded += on_loaded
+
+    # webview.start() 会阻塞直到窗口关闭
+    webview.start(debug=False)
 
 
 # ──────────────────────────────────────────────
@@ -81,9 +153,8 @@ class App(tk.Tk):
 
         self.title("RainExam - 雨课堂考题提取 & AI 解答")
         self.resizable(True, True)
-        self.minsize(620, 480)
+        self.minsize(640, 520)
 
-        # 队列用于线程安全地更新日志
         self._log_queue: queue.Queue = queue.Queue()
 
         self._build_ui()
@@ -99,41 +170,43 @@ class App(tk.Tk):
         cfg_frame = ttk.LabelFrame(self, text="配置", padding=8)
         cfg_frame.pack(fill="x", **pad)
 
-        # Cookie
+        # Cookie 行
         ttk.Label(cfg_frame, text="XT_COOKIE:").grid(row=0, column=0, sticky="w")
         self.cookie_var = tk.StringVar()
-        cookie_entry = ttk.Entry(cfg_frame, textvariable=self.cookie_var, width=60, show="*")
-        cookie_entry.grid(row=0, column=1, columnspan=3, sticky="ew", padx=(4, 0))
+        cookie_entry = ttk.Entry(cfg_frame, textvariable=self.cookie_var, width=52, show="*")
+        cookie_entry.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         ttk.Button(cfg_frame, text="显示/隐藏", width=9,
                    command=lambda: cookie_entry.config(
                        show="" if cookie_entry.cget("show") == "*" else "*"
-                   )).grid(row=0, column=4, padx=(4, 0))
+                   )).grid(row=0, column=2, padx=(4, 0))
+        # 登录获取按钮
+        ttk.Button(cfg_frame, text="登录自动获取", width=12,
+                   command=self._open_login_browser).grid(row=0, column=3, padx=(4, 0))
 
         # AI API Key
         ttk.Label(cfg_frame, text="AI_API_KEY:").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.api_key_var = tk.StringVar()
-        ak_entry = ttk.Entry(cfg_frame, textvariable=self.api_key_var, width=60, show="*")
-        ak_entry.grid(row=1, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(4, 0))
+        ak_entry = ttk.Entry(cfg_frame, textvariable=self.api_key_var, width=52, show="*")
+        ak_entry.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(4, 0))
         ttk.Button(cfg_frame, text="显示/隐藏", width=9,
                    command=lambda: ak_entry.config(
                        show="" if ak_entry.cget("show") == "*" else "*"
-                   )).grid(row=1, column=4, padx=(4, 0), pady=(4, 0))
+                   )).grid(row=1, column=2, padx=(4, 0), pady=(4, 0))
 
         # AI Base URL
         ttk.Label(cfg_frame, text="AI_BASE_URL:").grid(row=2, column=0, sticky="w", pady=(4, 0))
         self.base_url_var = tk.StringVar()
-        ttk.Entry(cfg_frame, textvariable=self.base_url_var, width=60).grid(
-            row=2, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(4, 0))
-        ttk.Label(cfg_frame, text="(可留空，默认 OpenAI)").grid(row=2, column=4, sticky="w", padx=(4, 0))
+        ttk.Entry(cfg_frame, textvariable=self.base_url_var, width=52).grid(
+            row=2, column=1, sticky="ew", padx=(4, 0), pady=(4, 0))
+        ttk.Label(cfg_frame, text="(可留空，默认 OpenAI)").grid(row=2, column=2, columnspan=2, sticky="w", padx=(4, 0))
 
-        # AI Model
+        # AI Model + 保存按钮
         ttk.Label(cfg_frame, text="AI_MODEL:").grid(row=3, column=0, sticky="w", pady=(4, 0))
         self.model_var = tk.StringVar(value="gpt-4o-mini")
         ttk.Entry(cfg_frame, textvariable=self.model_var, width=30).grid(
-            row=3, column=1, sticky="ew", padx=(4, 0), pady=(4, 0))
-
+            row=3, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
         ttk.Button(cfg_frame, text="保存配置", command=self._save_config).grid(
-            row=3, column=4, padx=(4, 0), pady=(4, 0))
+            row=3, column=3, padx=(4, 0), pady=(4, 0))
 
         cfg_frame.columnconfigure(1, weight=1)
 
@@ -188,8 +261,6 @@ class App(tk.Tk):
 
     def _save_config(self):
         env_path = get_env_path()
-
-        # 如果 .env 不存在，从 .env.example 复制
         if not env_path.is_file():
             example = get_base_dir() / ".env.example"
             if example.is_file():
@@ -212,6 +283,38 @@ class App(tk.Tk):
         self.status_var.set("配置已保存到 .env")
         messagebox.showinfo("保存成功", f"配置已保存到:\n{env_path}")
 
+    # ── 登录自动获取 Cookie ──
+
+    def _open_login_browser(self):
+        """在独立线程中打开 pywebview 浏览器，登录后自动回填 Cookie"""
+        self.status_var.set("正在打开登录窗口...")
+        self._log("正在打开雨课堂登录窗口，请在弹出的浏览器中完成登录...")
+
+        def callback(cookies: str | None, error: str | None):
+            # 此回调在 webview 线程，需切回主线程操作 tkinter
+            self.after(0, lambda: self._on_login_result(cookies, error))
+
+        t = threading.Thread(target=open_login_browser, args=(callback,), daemon=True)
+        t.start()
+
+    def _on_login_result(self, cookies: str | None, error: str | None):
+        """登录结果回调（已切回主线程）"""
+        if error:
+            self.status_var.set("获取 Cookie 失败")
+            messagebox.showerror("错误", error)
+            return
+
+        if not cookies:
+            self.status_var.set("未检测到登录")
+            messagebox.showwarning("提示", "未检测到登录 Cookie，请重试")
+            return
+
+        # document.cookie 返回 "key=val; key2=val2" 格式，已足够使用
+        self.cookie_var.set(cookies)
+        self.status_var.set("Cookie 已自动获取，请点「保存配置」")
+        self._log(f"Cookie 已自动获取（{len(cookies)} 字符）")
+        messagebox.showinfo("获取成功", "Cookie 已自动填入！\n请点击「保存配置」保存后再运行。")
+
     # ── 运行逻辑 ──
 
     def _run(self):
@@ -222,7 +325,7 @@ class App(tk.Tk):
 
         cookie = self.cookie_var.get().strip()
         if not cookie:
-            messagebox.showwarning("提示", "请先填写 XT_COOKIE\n\n获取方式：\n1. 登录雨课堂在线，进入考试页面\n2. 按 F12 → Network → 刷新\n3. 点击任意请求 → 复制 Cookie 值")
+            messagebox.showwarning("提示", "请先填写或自动获取 XT_COOKIE\n\n点击「登录自动获取」按钮即可")
             return
 
         if self.answer_var.get() and not self.api_key_var.get().strip():
@@ -233,14 +336,12 @@ class App(tk.Tk):
         self.status_var.set(f"正在处理试卷 {exam_id}...")
         self._log(f"[开始] 试卷 ID={exam_id}  AI解答={'开启' if self.answer_var.get() else '关闭'}")
 
-        # 在子线程中运行，避免阻塞 UI
         t = threading.Thread(target=self._run_in_thread, args=(exam_id,), daemon=True)
         t.start()
 
     def _run_in_thread(self, exam_id: str):
         import io
 
-        # 将 print 输出重定向到日志队列
         old_stdout = sys.stdout
         old_stderr = sys.stderr
 
@@ -258,7 +359,6 @@ class App(tk.Tk):
         sys.stderr = QueueWriter(self._log_queue)
 
         try:
-            # 设置环境变量（从界面取值）
             os.environ["XT_COOKIE"] = self.cookie_var.get().strip()
             if self.api_key_var.get().strip():
                 os.environ["AI_API_KEY"] = self.api_key_var.get().strip()
@@ -267,12 +367,9 @@ class App(tk.Tk):
             if self.model_var.get().strip():
                 os.environ["AI_MODEL"] = self.model_var.get().strip()
 
-            # 切换到项目根目录（保证 .env 和输出文件路径正确）
             base = get_base_dir()
             os.chdir(base)
 
-            # 调用核心逻辑
-            # 动态 import，确保 sys.path 里有 src/
             src_dir = str(Path(__file__).parent if not getattr(sys, "frozen", False) else base / "src")
             if src_dir not in sys.path:
                 sys.path.insert(0, src_dir)
@@ -293,7 +390,6 @@ class App(tk.Tk):
             questions = extract_questions(json_path)
             if not questions:
                 print("未提取到任何题目，请检查 Cookie 或试卷 ID")
-                self._log_queue.put("[失败] 未提取到题目")
                 return
 
             print(f"共提取到 {len(questions)} 道题")
@@ -340,7 +436,6 @@ class App(tk.Tk):
         self._log_queue.put(msg)
 
     def _poll_log_queue(self):
-        """每 100ms 检查队列，将新消息写入日志控件"""
         try:
             while True:
                 msg = self._log_queue.get_nowait()
