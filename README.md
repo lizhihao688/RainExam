@@ -80,6 +80,9 @@ python extract_questions.py --exam-id 4361438 --answer  # 提取 + AI 解答
 | 📄 **文件输出** | 整张试卷输出到 `answer.txt`               |
 
 ---
+## 运行截图
+![img.png](static/example.png)
+---
 
 ## 配置参考（.env 文件）
 
