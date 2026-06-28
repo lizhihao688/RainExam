@@ -229,6 +229,11 @@ class App(tk.Tk):
         self.id_entry = ttk.Entry(run_frame, textvariable=self.exam_id_var, width=20)
         self.id_entry.grid(row=0, column=3, sticky="w", padx=(4, 0))
 
+        # Classroom ID（仅 Quiz 模式显示）
+        self._cid_label = ttk.Label(run_frame, text="课堂 ID:")
+        self.classroom_id_var = tk.StringVar()
+        self._cid_entry = ttk.Entry(run_frame, textvariable=self.classroom_id_var, width=15)
+
         self.answer_var = tk.BooleanVar(value=False)
         self.ai_cb = ttk.Checkbutton(run_frame, text="启用 AI 解答", variable=self.answer_var)
         self.ai_cb.grid(row=0, column=4, padx=(16, 0))
@@ -270,7 +275,8 @@ class App(tk.Tk):
             self.model_var.set(env["AI_MODEL"])
         if env.get("QUIZ_ID"):
             self.exam_id_var.set(env["QUIZ_ID"])
-        self._classroom_id = env.get("CLASSROOM_ID", "")
+        if env.get("CLASSROOM_ID"):
+            self.classroom_id_var.set(env["CLASSROOM_ID"])
 
     def _save_config(self):
         env_path = get_env_path()
@@ -294,8 +300,8 @@ class App(tk.Tk):
         # 保存当前模式对应的 ID
         if self.mode_var.get() == "Quiz" and self.exam_id_var.get().strip():
             data["QUIZ_ID"] = self.exam_id_var.get().strip()
-        if getattr(self, "_classroom_id", "").strip():
-            data["CLASSROOM_ID"] = self._classroom_id.strip()
+        if self.classroom_id_var.get().strip():
+            data["CLASSROOM_ID"] = self.classroom_id_var.get().strip()
 
         save_env(env_path, data)
         self.status_var.set("配置已保存到 .env")
@@ -339,12 +345,17 @@ class App(tk.Tk):
         """切换模式时调整 UI 状态"""
         is_quiz = self.mode_var.get() == "Quiz"
         if is_quiz:
-            # Quiz 模式不需要 AI 解答（答案已在 API 中）
+            # Quiz 模式：显示课堂 ID 输入框，禁用 AI 解答
             self.answer_var.set(False)
             self.ai_cb.config(state="disabled")
+            self._cid_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
+            self._cid_entry.grid(row=1, column=1, columnspan=2, sticky="w", padx=(4, 0), pady=(6, 0))
             self.status_var.set("Quiz 模式：答案从 API 直接获取，无需 AI 解答")
         else:
+            # 考试模式：隐藏课堂 ID，启用 AI 解答
             self.ai_cb.config(state="normal")
+            self._cid_label.grid_forget()
+            self._cid_entry.grid_forget()
             self.status_var.set("考试模式")
 
     # ── 运行逻辑 ──
@@ -478,7 +489,7 @@ class App(tk.Tk):
         """Quiz 模式：拉取图片化试卷并生成 HTML 报告"""
         from quiz import process_quiz
 
-        classroom_id = getattr(self, "_classroom_id", "").strip()
+        classroom_id = self.classroom_id_var.get().strip()
         params: dict = {"quiz_id": quiz_id}
         if classroom_id:
             params["classroom_id"] = classroom_id
