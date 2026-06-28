@@ -16,3 +16,5 @@ __pycache__/
 answers_*.txt
 questions_*.txt
 exam_*.json
+images/
+*.html
