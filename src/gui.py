@@ -214,19 +214,29 @@ class App(tk.Tk):
         run_frame = ttk.LabelFrame(self, text="运行", padding=8)
         run_frame.pack(fill="x", **pad)
 
-        ttk.Label(run_frame, text="试卷 ID:").grid(row=0, column=0, sticky="w")
+        # 模式选择
+        ttk.Label(run_frame, text="模式:").grid(row=0, column=0, sticky="w")
+        self.mode_var = tk.StringVar(value="考试")
+        mode_cb = ttk.Combobox(
+            run_frame, textvariable=self.mode_var, width=8, state="readonly",
+            values=["考试", "Quiz"],
+        )
+        mode_cb.grid(row=0, column=1, sticky="w", padx=(4, 0))
+        mode_cb.bind("<<ComboboxSelected>>", self._on_mode_change)
+
+        ttk.Label(run_frame, text="ID:").grid(row=0, column=2, sticky="w", padx=(12, 0))
         self.exam_id_var = tk.StringVar()
-        ttk.Entry(run_frame, textvariable=self.exam_id_var, width=20).grid(
-            row=0, column=1, sticky="w", padx=(4, 0))
+        self.id_entry = ttk.Entry(run_frame, textvariable=self.exam_id_var, width=20)
+        self.id_entry.grid(row=0, column=3, sticky="w", padx=(4, 0))
 
         self.answer_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(run_frame, text="启用 AI 解答", variable=self.answer_var).grid(
-            row=0, column=2, padx=(16, 0))
+        self.ai_cb = ttk.Checkbutton(run_frame, text="启用 AI 解答", variable=self.answer_var)
+        self.ai_cb.grid(row=0, column=4, padx=(16, 0))
 
         self.run_btn = ttk.Button(run_frame, text="开始运行", command=self._run)
-        self.run_btn.grid(row=0, column=3, padx=(16, 0))
+        self.run_btn.grid(row=0, column=5, padx=(16, 0))
 
-        run_frame.columnconfigure(1, weight=1)
+        run_frame.columnconfigure(3, weight=1)
 
         # ── 日志区 ──
         log_frame = ttk.LabelFrame(self, text="运行日志", padding=8)
@@ -258,6 +268,9 @@ class App(tk.Tk):
             self.base_url_var.set(env["AI_BASE_URL"])
         if env.get("AI_MODEL"):
             self.model_var.set(env["AI_MODEL"])
+        if env.get("QUIZ_ID"):
+            self.exam_id_var.set(env["QUIZ_ID"])
+        self._classroom_id = env.get("CLASSROOM_ID", "")
 
     def _save_config(self):
         env_path = get_env_path()
@@ -278,6 +291,11 @@ class App(tk.Tk):
             data["AI_BASE_URL"] = self.base_url_var.get().strip()
         if self.model_var.get().strip():
             data["AI_MODEL"] = self.model_var.get().strip()
+        # 保存当前模式对应的 ID
+        if self.mode_var.get() == "Quiz" and self.exam_id_var.get().strip():
+            data["QUIZ_ID"] = self.exam_id_var.get().strip()
+        if getattr(self, "_classroom_id", "").strip():
+            data["CLASSROOM_ID"] = self._classroom_id.strip()
 
         save_env(env_path, data)
         self.status_var.set("配置已保存到 .env")
@@ -315,12 +333,30 @@ class App(tk.Tk):
         self._log(f"Cookie 已自动获取（{len(cookies)} 字符）")
         messagebox.showinfo("获取成功", "Cookie 已自动填入！\n请点击「保存配置」保存后再运行。")
 
+    # ── 模式切换 ──
+
+    def _on_mode_change(self, _event=None):
+        """切换模式时调整 UI 状态"""
+        is_quiz = self.mode_var.get() == "Quiz"
+        if is_quiz:
+            # Quiz 模式不需要 AI 解答（答案已在 API 中）
+            self.answer_var.set(False)
+            self.ai_cb.config(state="disabled")
+            self.status_var.set("Quiz 模式：答案从 API 直接获取，无需 AI 解答")
+        else:
+            self.ai_cb.config(state="normal")
+            self.status_var.set("考试模式")
+
     # ── 运行逻辑 ──
 
     def _run(self):
-        exam_id = self.exam_id_var.get().strip()
-        if not exam_id:
-            messagebox.showwarning("提示", "请先填写试卷 ID")
+        mode = self.mode_var.get()
+        id_val = self.exam_id_var.get().strip()
+        is_quiz = mode == "Quiz"
+
+        id_label = "Quiz ID" if is_quiz else "试卷 ID"
+        if not id_val:
+            messagebox.showwarning("提示", f"请先填写{id_label}")
             return
 
         cookie = self.cookie_var.get().strip()
@@ -328,18 +364,19 @@ class App(tk.Tk):
             messagebox.showwarning("提示", "请先填写或自动获取 XT_COOKIE\n\n点击「登录自动获取」按钮即可")
             return
 
-        if self.answer_var.get() and not self.api_key_var.get().strip():
+        if not is_quiz and self.answer_var.get() and not self.api_key_var.get().strip():
             messagebox.showwarning("提示", "启用 AI 解答需要填写 AI_API_KEY")
             return
 
         self.run_btn.config(state="disabled")
-        self.status_var.set(f"正在处理试卷 {exam_id}...")
-        self._log(f"[开始] 试卷 ID={exam_id}  AI解答={'开启' if self.answer_var.get() else '关闭'}")
+        self.status_var.set(f"正在处理 {id_label} {id_val}...")
+        self._log(f"[开始] 模式={mode}  {id_label}={id_val}"
+                  f"{'  AI解答=开启' if self.answer_var.get() else ''}")
 
-        t = threading.Thread(target=self._run_in_thread, args=(exam_id,), daemon=True)
+        t = threading.Thread(target=self._run_in_thread, args=(id_val, mode), daemon=True)
         t.start()
 
-    def _run_in_thread(self, exam_id: str):
+    def _run_in_thread(self, id_val: str, mode: str):
         import io
 
         old_stdout = sys.stdout
@@ -374,50 +411,10 @@ class App(tk.Tk):
             if src_dir not in sys.path:
                 sys.path.insert(0, src_dir)
 
-            from extract_questions import (
-                fetch_exam_paper,
-                extract_questions,
-                answer_questions,
-                write_pages,
-                resolve_ai_config,
-            )
-            import argparse
-
-            json_path = str(base / f"exam_{exam_id}.json")
-            fetch_exam_paper(exam_id, os.environ["XT_COOKIE"], json_path)
-
-            print("正在提取题目...")
-            questions = extract_questions(json_path)
-            if not questions:
-                print("未提取到任何题目，请检查 Cookie 或试卷 ID")
-                return
-
-            print(f"共提取到 {len(questions)} 道题")
-
-            answers = None
-            if self.answer_var.get():
-                args_ns = argparse.Namespace(
-                    ai_api_key=self.api_key_var.get().strip() or None,
-                    ai_base_url=self.base_url_var.get().strip() or None,
-                    ai_model=self.model_var.get().strip() or None,
-                )
-                ai_cfg = resolve_ai_config(args_ns)
-                answers = answer_questions(
-                    questions,
-                    api_key=ai_cfg["api_key"],
-                    base_url=ai_cfg["base_url"],
-                    model=ai_cfg["model"],
-                )
-
-            output_dir = str(base)
-            write_pages(questions, output_dir, exam_id, answers)
-
-            self._log_queue.put(f"[完成] 输出目录: {base}")
-            self.after(0, lambda: self.status_var.set("完成！"))
-            self.after(0, lambda: messagebox.showinfo(
-                "完成",
-                f"运行完成！\n共 {len(questions)} 道题\n输出目录: {base}"
-            ))
+            if mode == "Quiz":
+                self._run_quiz(id_val, base)
+            else:
+                self._run_exam(id_val, base)
 
         except Exception as e:
             import traceback
@@ -429,6 +426,80 @@ class App(tk.Tk):
             sys.stdout = old_stdout
             sys.stderr = old_stderr
             self.after(0, lambda: self.run_btn.config(state="normal"))
+
+    def _run_exam(self, exam_id: str, base: Path):
+        """考试模式：原有逻辑"""
+        from extract_questions import (
+            fetch_exam_paper,
+            extract_questions,
+            answer_questions,
+            write_pages,
+            resolve_ai_config,
+        )
+        import argparse
+
+        json_path = str(base / f"exam_{exam_id}.json")
+        fetch_exam_paper(exam_id, os.environ["XT_COOKIE"], json_path)
+
+        print("正在提取题目...")
+        questions = extract_questions(json_path)
+        if not questions:
+            print("未提取到任何题目，请检查 Cookie 或试卷 ID")
+            return
+
+        print(f"共提取到 {len(questions)} 道题")
+
+        answers = None
+        if self.answer_var.get():
+            args_ns = argparse.Namespace(
+                ai_api_key=self.api_key_var.get().strip() or None,
+                ai_base_url=self.base_url_var.get().strip() or None,
+                ai_model=self.model_var.get().strip() or None,
+            )
+            ai_cfg = resolve_ai_config(args_ns)
+            answers = answer_questions(
+                questions,
+                api_key=ai_cfg["api_key"],
+                base_url=ai_cfg["base_url"],
+                model=ai_cfg["model"],
+            )
+
+        output_dir = str(base)
+        write_pages(questions, output_dir, exam_id, answers)
+
+        self._log_queue.put(f"[完成] 输出目录: {base}")
+        self.after(0, lambda: self.status_var.set("完成！"))
+        self.after(0, lambda: messagebox.showinfo(
+            "完成",
+            f"运行完成！\n共 {len(questions)} 道题\n输出目录: {base}"
+        ))
+
+    def _run_quiz(self, quiz_id: str, base: Path):
+        """Quiz 模式：拉取图片化试卷并生成 HTML 报告"""
+        from quiz import process_quiz
+
+        classroom_id = getattr(self, "_classroom_id", "").strip()
+        params: dict = {"quiz_id": quiz_id}
+        if classroom_id:
+            params["classroom_id"] = classroom_id
+
+        output_dir = str(base)
+        html_path = process_quiz(
+            cookie=os.environ["XT_COOKIE"],
+            output_dir=output_dir,
+            **params,
+        )
+
+        if html_path:
+            self._log_queue.put(f"[完成] 报告: {html_path}")
+            self.after(0, lambda: self.status_var.set("完成！"))
+            self.after(0, lambda: messagebox.showinfo(
+                "完成",
+                f"Quiz 报告生成完成！\n文件: {html_path}"
+            ))
+        else:
+            self._log_queue.put("[完成] 未生成报告")
+            self.after(0, lambda: self.status_var.set("完成（无数据）"))
 
     # ── 日志 ──
 
