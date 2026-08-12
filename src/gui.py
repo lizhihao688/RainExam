@@ -1,15 +1,24 @@
 """
 RainExam GUI 入口
 - 基于 tkinter（Python 内置，无需额外依赖）
-- 支持通过内嵌浏览器（pywebview）自动获取雨课堂 Cookie
+- 通过启动 Chrome/Edge + CDP 自动获取雨课堂 Cookie
 - 替代 run.bat，Windows 用户直接双击 RainExam.exe 运行
 """
 
+import base64
+import json
 import os
 import queue
+import re
+import socket
+import struct
+import subprocess
 import sys
+import tempfile
 import threading
+import time
 import tkinter as tk
+import urllib.request
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
@@ -71,76 +80,255 @@ def save_env(env_path: Path, data: dict):
 
 
 # ──────────────────────────────────────────────
-# Cookie 自动获取（pywebview）
+# Chrome CDP 自动获取 Cookie
 # ──────────────────────────────────────────────
 
-# 雨课堂登录入口页（进入后跳转考试系统）
-_XT_LOGIN_URL = "https://passport.yuketang.cn/user-fe/login?next=https://examination.xuetangx.com"
-
-# 登录成功标志：Cookie 中包含 x_access_token
+_XT_LOGIN_URL = "https://www.yuketang.cn/v2/web/index"
 _LOGIN_COOKIE_KEY = "x_access_token"
 
-# 轮询检测登录的 JS（注入到页面中）
-_POLL_JS = """
-(function startLoginPoll() {
-    var timer = setInterval(function() {
-        var cookies = document.cookie;
-        if (cookies.indexOf('x_access_token') !== -1) {
-            clearInterval(timer);
-            window.pywebview.api.on_login_detected(cookies);
-        }
-    }, 800);
-})();
-"""
+
+def find_chrome() -> str | None:
+    """在系统中查找 Chrome 或 Edge 浏览器可执行文件路径"""
+    candidates = []
+    if sys.platform == "win32":
+        candidates = [
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ]
+    else:
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/microsoft-edge",
+        ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def find_free_port() -> int:
+    """找一个可用的本地端口"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def start_chrome(port: int, url: str) -> tuple[subprocess.Popen | None, str | None]:
+    """启动 Chrome/Edge 并开启 CDP 调试端口，返回 (进程, 错误信息)"""
+    chrome = find_chrome()
+    if not chrome:
+        return None, "未找到 Chrome 或 Edge 浏览器，请先安装"
+
+    profile_dir = tempfile.mkdtemp(prefix="rainexam_")
+    try:
+        proc = subprocess.Popen([
+            chrome,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--disable-popup-blocking",
+            url,
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        return None, f"启动浏览器失败: {e}"
+
+    return proc, None
+
+
+# ── 最小 WebSocket 客户端（仅用于 CDP 单次通信）──
+
+def _ws_handshake(sock: socket.socket, host: str, port: int, path: str):
+    """完成 WebSocket 握手"""
+    key = base64.b64encode(os.urandom(16)).decode()
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Upgrade: websocket\r\n"
+        f"Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        f"Sec-WebSocket-Version: 13\r\n"
+        f"\r\n"
+    )
+    sock.sendall(request.encode())
+
+    response = b""
+    while b"\r\n\r\n" not in response:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise ConnectionError("WebSocket 握手失败：连接关闭")
+        response += chunk
+
+    if b"101" not in response.split(b"\r\n")[0]:
+        raise ConnectionError("WebSocket 握手失败：服务端未返回 101")
+
+
+def _ws_send(sock: socket.socket, data: str):
+    """发送 WebSocket 文本帧（客户端→服务端需 mask）"""
+    payload = data.encode("utf-8")
+    mask_key = os.urandom(4)
+    masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+    header = bytearray()
+    header.append(0x81)  # FIN + text opcode
+    length = len(payload)
+    if length < 126:
+        header.append(0x80 | length)
+    elif length < 65536:
+        header.append(0x80 | 126)
+        header.extend(struct.pack(">H", length))
+    else:
+        header.append(0x80 | 127)
+        header.extend(struct.pack(">Q", length))
+    header.extend(mask_key)
+
+    sock.sendall(header + masked)
+
+
+def _ws_recv(sock: socket.socket) -> str:
+    """接收一个 WebSocket 文本帧"""
+    header = bytearray()
+    while len(header) < 2:
+        header.extend(sock.recv(2 - len(header)))
+
+    opcode = header[0] & 0x0F
+    masked = (header[1] & 0x80) != 0
+    length = header[1] & 0x7F
+
+    if length == 126:
+        raw = sock.recv(2)
+        length = struct.unpack(">H", raw)[0]
+    elif length == 127:
+        raw = sock.recv(8)
+        length = struct.unpack(">Q", raw)[0]
+
+    mask_key = sock.recv(4) if masked else None
+
+    data = b""
+    while len(data) < length:
+        chunk = sock.recv(min(length - len(data), 65536))
+        if not chunk:
+            break
+        data += chunk
+
+    if masked and mask_key:
+        data = bytes(b ^ mask_key[i % 4] for i, b in enumerate(data))
+
+    # 忽略非文本帧（ping/close 等）
+    if opcode == 0x8:  # close
+        return ""
+    if opcode == 0x9:  # ping
+        _ws_send(sock, data.decode("utf-8", errors="ignore"))  # pong
+        return _ws_recv(sock)
+    if opcode != 0x1:  # 非 text
+        return ""
+
+    return data.decode("utf-8")
+
+
+def get_cookies_cdp(port: int) -> list[dict]:
+    """通过 CDP 获取当前页面所有 Cookie"""
+    # 1. 通过 HTTP 获取页面列表，找到 WebSocket 调试 URL
+    resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=3)
+    pages = json.loads(resp.read())
+
+    if not pages:
+        return []
+
+    # 优先找雨课堂相关页面，否则取第一个
+    target = None
+    for page in pages:
+        url = page.get("url", "")
+        if "xuetangx" in url or "yuketang" in url:
+            target = page
+            break
+    if not target:
+        target = pages[0]
+
+    ws_url = target.get("webSocketDebuggerUrl", "")
+    if not ws_url:
+        return []
+
+    # 2. 解析 ws://127.0.0.1:port/path
+    match = re.match(r"ws://([^:]+):(\d+)(/.*)", ws_url)
+    if not match:
+        return []
+
+    host, ws_port, path = match.group(1), int(match.group(2)), match.group(3)
+
+    # 3. 连接 WebSocket 并发送 CDP 命令获取 Cookie
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    try:
+        sock.connect((host, ws_port))
+        _ws_handshake(sock, host, ws_port, path)
+
+        cmd = {"id": 1, "method": "Network.getCookies", "params": {}}
+        _ws_send(sock, json.dumps(cmd))
+
+        # 读取响应（可能收到多个帧，找 id=1 的那个）
+        for _ in range(10):
+            raw = _ws_recv(sock)
+            if not raw:
+                continue
+            try:
+                msg = json.loads(raw)
+                if msg.get("id") == 1:
+                    return msg.get("result", {}).get("cookies", [])
+            except json.JSONDecodeError:
+                continue
+
+        return []
+    finally:
+        sock.close()
 
 
 def open_login_browser(callback):
     """
-    在独立线程里打开 pywebview 浏览器窗口，用户登录后自动回调 callback(cookie_str)。
-    callback 在 pywebview 线程中被调用，需自行切换到主线程（通过 tkinter.after）。
+    启动 Chrome/Edge 登录雨课堂，自动检测登录成功后获取 Cookie。
+    callback(cookies, error) 在子线程中被调用。
     """
-    try:
-        import webview
-    except ImportError:
-        callback(None, error="未安装 pywebview，请先执行: pip install pywebview")
+    port = find_free_port()
+    proc, error = start_chrome(port, _XT_LOGIN_URL)
+
+    if error:
+        callback(None, error=error)
         return
 
-    class Api:
-        """暴露给 JS 调用的 Python 对象"""
-        def __init__(self):
-            self._window = None
+    # 等待 Chrome 启动，CDP 就绪
+    time.sleep(2)
 
-        def set_window(self, w):
-            self._window = w
-
-        def on_login_detected(self, cookies: str):
-            """JS 检测到登录成功后调用此方法"""
-            callback(cookies, error=None)
-            # 延迟关闭窗口，避免 JS 调用还没返回就销毁
-            if self._window:
-                threading.Timer(0.5, self._window.destroy).start()
-
-    api = Api()
-    window = webview.create_window(
-        title="登录雨课堂 - 登录成功后窗口将自动关闭",
-        url=_XT_LOGIN_URL,
-        js_api=api,
-        width=1024,
-        height=700,
-    )
-    api.set_window(window)
-
-    def on_loaded():
-        # 每次页面加载完成后注入轮询脚本
+    # 轮询检测 Cookie（最多等 5 分钟）
+    max_wait = 300
+    interval = 2
+    for _ in range(max_wait // interval):
         try:
-            window.evaluate_js(_POLL_JS)
+            cookies = get_cookies_cdp(port)
+            if any(c["name"] == _LOGIN_COOKIE_KEY for c in cookies):
+                # 登录成功！拼接 Cookie 字符串
+                cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+                proc.terminate()
+                callback(cookie_str, error=None)
+                return
         except Exception:
+            # CDP 可能还没就绪，或页面还在加载，忽略异常继续轮询
             pass
+        time.sleep(interval)
 
-    window.events.loaded += on_loaded
-
-    # webview.start() 会阻塞直到窗口关闭
-    webview.start(debug=False)
+    # 超时
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    callback(None, error="登录超时（5分钟），请重试")
 
 
 # ──────────────────────────────────────────────
@@ -173,7 +361,7 @@ class App(tk.Tk):
         # Cookie 行
         ttk.Label(cfg_frame, text="XT_COOKIE:").grid(row=0, column=0, sticky="w")
         self.cookie_var = tk.StringVar()
-        cookie_entry = ttk.Entry(cfg_frame, textvariable=self.cookie_var, width=52, show="*")
+        cookie_entry = ttk.Entry(cfg_frame, textvariable=self.cookie_var, width=50, show="*")
         cookie_entry.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         ttk.Button(cfg_frame, text="显示/隐藏", width=9,
                    command=lambda: cookie_entry.config(
@@ -186,7 +374,7 @@ class App(tk.Tk):
         # AI API Key
         ttk.Label(cfg_frame, text="AI_API_KEY:").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.api_key_var = tk.StringVar()
-        ak_entry = ttk.Entry(cfg_frame, textvariable=self.api_key_var, width=52, show="*")
+        ak_entry = ttk.Entry(cfg_frame, textvariable=self.api_key_var, width=50, show="*")
         ak_entry.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(4, 0))
         ttk.Button(cfg_frame, text="显示/隐藏", width=9,
                    command=lambda: ak_entry.config(
@@ -196,9 +384,10 @@ class App(tk.Tk):
         # AI Base URL
         ttk.Label(cfg_frame, text="AI_BASE_URL:").grid(row=2, column=0, sticky="w", pady=(4, 0))
         self.base_url_var = tk.StringVar()
-        ttk.Entry(cfg_frame, textvariable=self.base_url_var, width=52).grid(
+        ttk.Entry(cfg_frame, textvariable=self.base_url_var, width=50).grid(
             row=2, column=1, sticky="ew", padx=(4, 0), pady=(4, 0))
-        ttk.Label(cfg_frame, text="(可留空，默认 OpenAI)").grid(row=2, column=2, columnspan=2, sticky="w", padx=(4, 0))
+        ttk.Label(cfg_frame, text="(可留空，默认 OpenAI)").grid(
+            row=2, column=2, columnspan=2, sticky="w", padx=(4, 0))
 
         # AI Model + 保存按钮
         ttk.Label(cfg_frame, text="AI_MODEL:").grid(row=3, column=0, sticky="w", pady=(4, 0))
@@ -214,34 +403,19 @@ class App(tk.Tk):
         run_frame = ttk.LabelFrame(self, text="运行", padding=8)
         run_frame.pack(fill="x", **pad)
 
-        # 模式选择
-        ttk.Label(run_frame, text="模式:").grid(row=0, column=0, sticky="w")
-        self.mode_var = tk.StringVar(value="考试")
-        mode_cb = ttk.Combobox(
-            run_frame, textvariable=self.mode_var, width=8, state="readonly",
-            values=["考试", "Quiz"],
-        )
-        mode_cb.grid(row=0, column=1, sticky="w", padx=(4, 0))
-        mode_cb.bind("<<ComboboxSelected>>", self._on_mode_change)
-
-        ttk.Label(run_frame, text="ID:").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        ttk.Label(run_frame, text="试卷 ID:").grid(row=0, column=0, sticky="w")
         self.exam_id_var = tk.StringVar()
-        self.id_entry = ttk.Entry(run_frame, textvariable=self.exam_id_var, width=20)
-        self.id_entry.grid(row=0, column=3, sticky="w", padx=(4, 0))
-
-        # Classroom ID（仅 Quiz 模式显示）
-        self._cid_label = ttk.Label(run_frame, text="课堂 ID:")
-        self.classroom_id_var = tk.StringVar()
-        self._cid_entry = ttk.Entry(run_frame, textvariable=self.classroom_id_var, width=15)
+        ttk.Entry(run_frame, textvariable=self.exam_id_var, width=20).grid(
+            row=0, column=1, sticky="w", padx=(4, 0))
 
         self.answer_var = tk.BooleanVar(value=False)
-        self.ai_cb = ttk.Checkbutton(run_frame, text="启用 AI 解答", variable=self.answer_var)
-        self.ai_cb.grid(row=0, column=4, padx=(16, 0))
+        ttk.Checkbutton(run_frame, text="启用 AI 解答", variable=self.answer_var).grid(
+            row=0, column=2, padx=(16, 0))
 
         self.run_btn = ttk.Button(run_frame, text="开始运行", command=self._run)
-        self.run_btn.grid(row=0, column=5, padx=(16, 0))
+        self.run_btn.grid(row=0, column=3, padx=(16, 0))
 
-        run_frame.columnconfigure(3, weight=1)
+        run_frame.columnconfigure(1, weight=1)
 
         # ── 日志区 ──
         log_frame = ttk.LabelFrame(self, text="运行日志", padding=8)
@@ -273,10 +447,6 @@ class App(tk.Tk):
             self.base_url_var.set(env["AI_BASE_URL"])
         if env.get("AI_MODEL"):
             self.model_var.set(env["AI_MODEL"])
-        if env.get("QUIZ_ID"):
-            self.exam_id_var.set(env["QUIZ_ID"])
-        if env.get("CLASSROOM_ID"):
-            self.classroom_id_var.set(env["CLASSROOM_ID"])
 
     def _save_config(self):
         env_path = get_env_path()
@@ -297,11 +467,6 @@ class App(tk.Tk):
             data["AI_BASE_URL"] = self.base_url_var.get().strip()
         if self.model_var.get().strip():
             data["AI_MODEL"] = self.model_var.get().strip()
-        # 保存当前模式对应的 ID
-        if self.mode_var.get() == "Quiz" and self.exam_id_var.get().strip():
-            data["QUIZ_ID"] = self.exam_id_var.get().strip()
-        if self.classroom_id_var.get().strip():
-            data["CLASSROOM_ID"] = self.classroom_id_var.get().strip()
 
         save_env(env_path, data)
         self.status_var.set("配置已保存到 .env")
@@ -310,12 +475,12 @@ class App(tk.Tk):
     # ── 登录自动获取 Cookie ──
 
     def _open_login_browser(self):
-        """在独立线程中打开 pywebview 浏览器，登录后自动回填 Cookie"""
-        self.status_var.set("正在打开登录窗口...")
-        self._log("正在打开雨课堂登录窗口，请在弹出的浏览器中完成登录...")
+        """在独立线程中启动 Chrome 登录雨课堂，登录后自动回填 Cookie"""
+        self.status_var.set("正在启动浏览器...")
+        self._log("正在启动浏览器，请在弹出的 Chrome/Edge 中登录雨课堂...")
 
         def callback(cookies: str | None, error: str | None):
-            # 此回调在 webview 线程，需切回主线程操作 tkinter
+            # 此回调在子线程，需切回主线程操作 tkinter
             self.after(0, lambda: self._on_login_result(cookies, error))
 
         t = threading.Thread(target=open_login_browser, args=(callback,), daemon=True)
@@ -333,41 +498,17 @@ class App(tk.Tk):
             messagebox.showwarning("提示", "未检测到登录 Cookie，请重试")
             return
 
-        # document.cookie 返回 "key=val; key2=val2" 格式，已足够使用
         self.cookie_var.set(cookies)
         self.status_var.set("Cookie 已自动获取，请点「保存配置」")
         self._log(f"Cookie 已自动获取（{len(cookies)} 字符）")
         messagebox.showinfo("获取成功", "Cookie 已自动填入！\n请点击「保存配置」保存后再运行。")
 
-    # ── 模式切换 ──
-
-    def _on_mode_change(self, _event=None):
-        """切换模式时调整 UI 状态"""
-        is_quiz = self.mode_var.get() == "Quiz"
-        if is_quiz:
-            # Quiz 模式：显示课堂 ID 输入框，禁用 AI 解答
-            self.answer_var.set(False)
-            self.ai_cb.config(state="disabled")
-            self._cid_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
-            self._cid_entry.grid(row=1, column=1, columnspan=2, sticky="w", padx=(4, 0), pady=(6, 0))
-            self.status_var.set("Quiz 模式：答案从 API 直接获取，无需 AI 解答")
-        else:
-            # 考试模式：隐藏课堂 ID，启用 AI 解答
-            self.ai_cb.config(state="normal")
-            self._cid_label.grid_forget()
-            self._cid_entry.grid_forget()
-            self.status_var.set("考试模式")
-
     # ── 运行逻辑 ──
 
     def _run(self):
-        mode = self.mode_var.get()
-        id_val = self.exam_id_var.get().strip()
-        is_quiz = mode == "Quiz"
-
-        id_label = "Quiz ID" if is_quiz else "试卷 ID"
-        if not id_val:
-            messagebox.showwarning("提示", f"请先填写{id_label}")
+        exam_id = self.exam_id_var.get().strip()
+        if not exam_id:
+            messagebox.showwarning("提示", "请先填写试卷 ID")
             return
 
         cookie = self.cookie_var.get().strip()
@@ -375,19 +516,18 @@ class App(tk.Tk):
             messagebox.showwarning("提示", "请先填写或自动获取 XT_COOKIE\n\n点击「登录自动获取」按钮即可")
             return
 
-        if not is_quiz and self.answer_var.get() and not self.api_key_var.get().strip():
+        if self.answer_var.get() and not self.api_key_var.get().strip():
             messagebox.showwarning("提示", "启用 AI 解答需要填写 AI_API_KEY")
             return
 
         self.run_btn.config(state="disabled")
-        self.status_var.set(f"正在处理 {id_label} {id_val}...")
-        self._log(f"[开始] 模式={mode}  {id_label}={id_val}"
-                  f"{'  AI解答=开启' if self.answer_var.get() else ''}")
+        self.status_var.set(f"正在处理试卷 {exam_id}...")
+        self._log(f"[开始] 试卷 ID={exam_id}  AI解答={'开启' if self.answer_var.get() else '关闭'}")
 
-        t = threading.Thread(target=self._run_in_thread, args=(id_val, mode), daemon=True)
+        t = threading.Thread(target=self._run_in_thread, args=(exam_id,), daemon=True)
         t.start()
 
-    def _run_in_thread(self, id_val: str, mode: str):
+    def _run_in_thread(self, exam_id: str):
         import io
 
         old_stdout = sys.stdout
@@ -422,10 +562,50 @@ class App(tk.Tk):
             if src_dir not in sys.path:
                 sys.path.insert(0, src_dir)
 
-            if mode == "Quiz":
-                self._run_quiz(id_val, base)
-            else:
-                self._run_exam(id_val, base)
+            from extract_questions import (
+                fetch_exam_paper,
+                extract_questions,
+                answer_questions,
+                write_pages,
+                resolve_ai_config,
+            )
+            import argparse
+
+            json_path = str(base / f"exam_{exam_id}.json")
+            fetch_exam_paper(exam_id, os.environ["XT_COOKIE"], json_path)
+
+            print("正在提取题目...")
+            questions = extract_questions(json_path)
+            if not questions:
+                print("未提取到任何题目，请检查 Cookie 或试卷 ID")
+                return
+
+            print(f"共提取到 {len(questions)} 道题")
+
+            answers = None
+            if self.answer_var.get():
+                args_ns = argparse.Namespace(
+                    ai_api_key=self.api_key_var.get().strip() or None,
+                    ai_base_url=self.base_url_var.get().strip() or None,
+                    ai_model=self.model_var.get().strip() or None,
+                )
+                ai_cfg = resolve_ai_config(args_ns)
+                answers = answer_questions(
+                    questions,
+                    api_key=ai_cfg["api_key"],
+                    base_url=ai_cfg["base_url"],
+                    model=ai_cfg["model"],
+                )
+
+            output_dir = str(base)
+            write_pages(questions, output_dir, exam_id, answers)
+
+            self._log_queue.put(f"[完成] 输出目录: {base}")
+            self.after(0, lambda: self.status_var.set("完成！"))
+            self.after(0, lambda: messagebox.showinfo(
+                "完成",
+                f"运行完成！\n共 {len(questions)} 道题\n输出目录: {base}"
+            ))
 
         except Exception as e:
             import traceback
@@ -437,80 +617,6 @@ class App(tk.Tk):
             sys.stdout = old_stdout
             sys.stderr = old_stderr
             self.after(0, lambda: self.run_btn.config(state="normal"))
-
-    def _run_exam(self, exam_id: str, base: Path):
-        """考试模式：原有逻辑"""
-        from extract_questions import (
-            fetch_exam_paper,
-            extract_questions,
-            answer_questions,
-            write_pages,
-            resolve_ai_config,
-        )
-        import argparse
-
-        json_path = str(base / f"exam_{exam_id}.json")
-        fetch_exam_paper(exam_id, os.environ["XT_COOKIE"], json_path)
-
-        print("正在提取题目...")
-        questions = extract_questions(json_path)
-        if not questions:
-            print("未提取到任何题目，请检查 Cookie 或试卷 ID")
-            return
-
-        print(f"共提取到 {len(questions)} 道题")
-
-        answers = None
-        if self.answer_var.get():
-            args_ns = argparse.Namespace(
-                ai_api_key=self.api_key_var.get().strip() or None,
-                ai_base_url=self.base_url_var.get().strip() or None,
-                ai_model=self.model_var.get().strip() or None,
-            )
-            ai_cfg = resolve_ai_config(args_ns)
-            answers = answer_questions(
-                questions,
-                api_key=ai_cfg["api_key"],
-                base_url=ai_cfg["base_url"],
-                model=ai_cfg["model"],
-            )
-
-        output_dir = str(base)
-        write_pages(questions, output_dir, exam_id, answers)
-
-        self._log_queue.put(f"[完成] 输出目录: {base}")
-        self.after(0, lambda: self.status_var.set("完成！"))
-        self.after(0, lambda: messagebox.showinfo(
-            "完成",
-            f"运行完成！\n共 {len(questions)} 道题\n输出目录: {base}"
-        ))
-
-    def _run_quiz(self, quiz_id: str, base: Path):
-        """Quiz 模式：拉取图片化试卷并生成 HTML 报告"""
-        from quiz import process_quiz
-
-        classroom_id = self.classroom_id_var.get().strip()
-        params: dict = {"quiz_id": quiz_id}
-        if classroom_id:
-            params["classroom_id"] = classroom_id
-
-        output_dir = str(base)
-        html_path = process_quiz(
-            cookie=os.environ["XT_COOKIE"],
-            output_dir=output_dir,
-            **params,
-        )
-
-        if html_path:
-            self._log_queue.put(f"[完成] 报告: {html_path}")
-            self.after(0, lambda: self.status_var.set("完成！"))
-            self.after(0, lambda: messagebox.showinfo(
-                "完成",
-                f"Quiz 报告生成完成！\n文件: {html_path}"
-            ))
-        else:
-            self._log_queue.put("[完成] 未生成报告")
-            self.after(0, lambda: self.status_var.set("完成（无数据）"))
 
     # ── 日志 ──
 
@@ -540,8 +646,11 @@ class App(tk.Tk):
 # ──────────────────────────────────────────────
 
 def main():
-    app = App()
-    app.mainloop()
+    # app = App()
+    # app.mainloop()
+    s = find_chrome()
+    print(s)
+    start_chrome(find_free_port(), _XT_LOGIN_URL)
 
 
 if __name__ == "__main__":
