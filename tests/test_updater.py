@@ -313,11 +313,26 @@ class LeftoverTest(unittest.TestCase):
 
 
 class StatePathTest(unittest.TestCase):
+    def test_dir_writable_checks_real_filesystem(self):
+        """用「普通文件 + 子目录」构造跨平台都不可写的路径"""
+        tmp = Path(tempfile.mkdtemp(prefix="rainexam_state_"))
+        blocker = tmp / "not-a-dir"
+        blocker.write_text("x", encoding="utf-8")
+        self.assertFalse(updater._dir_writable(blocker / "sub"))
+        self.assertTrue(updater._dir_writable(tmp))
+
     def test_state_path_when_base_dir_not_writable(self):
         """程序目录不可写时，状态文件应退到用户目录，保证缓存/忽略仍然生效"""
-        readonly = Path("/rainexam-not-writable-xyz")     # 绝对不存在的只读路径
-        mgr = updater.UpdateManager(readonly, current_version="2.0.1")
-        self.assertNotEqual(mgr.state_path.parent, readonly)
+        # 不要用「绝对不存在的路径」模拟只读：Windows CI 上 D:\ 根目录其实可写，
+        # 直接打桩 _dir_writable 才能稳定覆盖这条分支
+        tmp = Path(tempfile.mkdtemp(prefix="rainexam_state_"))
+        real = updater._dir_writable
+        updater._dir_writable = lambda path: False
+        try:
+            mgr = updater.UpdateManager(tmp, current_version="2.0.1")
+        finally:
+            updater._dir_writable = real
+        self.assertNotEqual(mgr.state_path, tmp / updater.STATE_FILE)
         self.assertTrue(mgr.state_path.name.endswith(".json"))
 
     def test_state_path_defaults_into_base_dir(self):
