@@ -20,6 +20,9 @@ a = Analysis(
     ],
     hiddenimports=[
         'extract_questions',
+        'quiz',             # Quiz 模式（函数内延迟导入，显式列出更保险）
+        'updater',          # 自动更新模块
+        'version',          # 版本号（打包前由 CI 按 tag 覆盖）
         'openai',
         'httpx',
         'tkinter',

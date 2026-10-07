@@ -18,3 +18,14 @@ questions_*.txt
 exam_*.json
 images/
 *.html
+
+# 自动更新产生的文件（检查缓存 / 下载的新版 exe / 替换失败日志 / 旧版备份）
+.rainexam_update.json
+RainExam_update.exe
+RainExam_update.log
+RainExam.exe.old
+*.exe.old
+
+# 打包产物
+build/
+dist/

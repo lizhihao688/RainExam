@@ -2,8 +2,11 @@
 RainExam GUI 入口
 - 基于 tkinter（Python 内置，无需额外依赖）
 - 支持通过内嵌浏览器（pywebview）自动获取雨课堂 Cookie
+- 支持自动检查更新（见 updater.py）
 - 替代 run.bat，Windows 用户直接双击 RainExam.exe 运行
 """
+
+from __future__ import annotations  # 让类型注解延迟求值，兼容旧解释器
 
 import os
 import queue
@@ -12,6 +15,33 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
+
+# ──────────────────────────────────────────────
+# 自动更新模块（updater.py 与 gui.py 同目录）
+# 导入失败时降级为「无更新功能」，不影响主流程
+# ──────────────────────────────────────────────
+
+try:
+    from updater import (
+        UpdateManager,
+        clear_update_backup,
+        plain_notes,
+        take_update_error_log,
+    )
+
+    _UPDATER_IMPORT_ERROR = ""
+except Exception as _exc:  # pragma: no cover
+    UpdateManager = None  # type: ignore
+    _UPDATER_IMPORT_ERROR = str(_exc)
+
+    def plain_notes(text, limit=900):  # type: ignore
+        return text or ""
+
+    def clear_update_backup():  # type: ignore
+        pass
+
+    def take_update_error_log():  # type: ignore
+        return ""
 
 
 # ──────────────────────────────────────────────
@@ -156,10 +186,19 @@ class App(tk.Tk):
         self.minsize(640, 520)
 
         self._log_queue: queue.Queue = queue.Queue()
+        self._ui_queue: queue.Queue = queue.Queue()   # 后台线程 -> 主线程 的操作队列
+
+        # 更新相关状态
+        self.update_mgr = None
+        self._update_checking = False
+        self._downloading = False
+        self._pending_release = None
+        self._running = False
 
         self._build_ui()
         self._load_saved_config()
         self._poll_log_queue()
+        self._init_updater()
 
     # ── UI 构建 ──
 
@@ -256,10 +295,21 @@ class App(tk.Tk):
         ttk.Button(log_frame, text="清空日志", command=self._clear_log).pack(
             anchor="e", pady=(4, 0))
 
-        # ── 状态栏 ──
+        # ── 状态栏 + 版本 / 更新按钮 ──
+        bottom = ttk.Frame(self)
+        bottom.pack(fill="x", side="bottom")
+
         self.status_var = tk.StringVar(value="就绪")
-        ttk.Label(self, textvariable=self.status_var, anchor="w",
-                  relief="sunken").pack(fill="x", side="bottom", ipady=2)
+        ttk.Label(bottom, textvariable=self.status_var, anchor="w",
+                  relief="sunken", padding=(6, 2)).pack(
+            side="left", fill="x", expand=True)
+
+        self.version_label = ttk.Label(bottom, text="v-", relief="sunken", padding=(6, 2))
+        self.version_label.pack(side="left")
+
+        self.update_btn = ttk.Button(bottom, text="检查更新", width=10,
+                                     command=lambda: self._check_update(silent=False))
+        self.update_btn.pack(side="left", padx=(6, 6), pady=1)
 
     # ── 配置加载 / 保存 ──
 
@@ -380,6 +430,7 @@ class App(tk.Tk):
             return
 
         self.run_btn.config(state="disabled")
+        self._running = True
         self.status_var.set(f"正在处理 {id_label} {id_val}...")
         self._log(f"[开始] 模式={mode}  {id_label}={id_val}"
                   f"{'  AI解答=开启' if self.answer_var.get() else ''}")
@@ -436,6 +487,7 @@ class App(tk.Tk):
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
+            self._running = False
             self.after(0, lambda: self.run_btn.config(state="normal"))
 
     def _run_exam(self, exam_id: str, base: Path):
@@ -512,7 +564,226 @@ class App(tk.Tk):
             self._log_queue.put("[完成] 未生成报告")
             self.after(0, lambda: self.status_var.set("完成（无数据）"))
 
+    # ── 自动更新 ──
+
+    def _init_updater(self):
+        """初始化更新管理器，并在后台静默检查一次更新"""
+        self._report_last_update_result()
+
+        if UpdateManager is None:
+            self.update_btn.config(state="disabled")
+            self._log(f"[更新] 更新模块不可用：{_UPDATER_IMPORT_ERROR}")
+            return
+
+        try:
+            self.update_mgr = UpdateManager(base_dir=get_base_dir())
+        except Exception as e:
+            self.update_btn.config(state="disabled")
+            self._log(f"[更新] 初始化失败：{e}")
+            return
+
+        version = self.update_mgr.current_version
+        self.version_label.config(text=f"v{version}")
+        self._log(f"RainExam v{version} 已启动，正在后台检查更新...")
+        # 窗口先显示出来，再延迟检查，避免拖慢启动
+        self.after(2000, lambda: self._check_update(silent=True))
+
+    def _report_last_update_result(self):
+        """处理上次自动更新留下的备份与失败日志"""
+        try:
+            clear_update_backup()   # 能走到这里说明新版本启动正常
+            error = take_update_error_log()
+        except Exception as e:  # noqa: BLE001
+            self._log(f"[更新] 检查更新遗留文件失败：{e}")
+            return
+
+        if not error:
+            return
+
+        self._log(f"[更新] 上次自动更新未成功：{error}")
+        self.after(600, lambda: messagebox.showwarning(
+            "上次自动更新未完成",
+            "上次自动更新没有成功完成，程序已保持/恢复为旧版本，可以正常使用。\n\n"
+            "如果确实无法使用，可把程序目录下的 RainExam.exe.old\n"
+            "改名为 RainExam.exe 即可回退。\n\n"
+            f"技术详情：\n{error}"))
+
+    def _check_update(self, silent: bool = True):
+        """silent=True：后台静默检查，失败或已是最新都不打扰用户"""
+        if self.update_mgr is None or self._update_checking or self._downloading:
+            return
+
+        self._update_checking = True
+        self.update_btn.config(state="disabled")
+        if not silent:
+            self.status_var.set("正在检查更新...")
+            self._log("[更新] 正在检查更新...")
+
+        threading.Thread(target=self._check_update_thread, args=(silent,), daemon=True).start()
+
+    def _check_update_thread(self, silent: bool):
+        release = None
+        error = ""
+        try:
+            release = self.update_mgr.check(force=not silent)
+            error = self.update_mgr.last_error
+        except Exception as e:  # noqa: BLE001
+            error = str(e)
+        self._post(lambda: self._on_update_result(release, error, silent))
+
+    def _on_update_result(self, release, error: str, silent: bool):
+        self._update_checking = False
+        self.update_btn.config(state="normal")
+        current = self.update_mgr.current_version
+
+        if error:
+            self._log(f"[更新] 检查更新失败：{error}")
+            self.status_var.set("检查更新失败，可稍后重试")
+            if not silent:
+                messagebox.showwarning("检查更新", f"检查更新失败：\n\n{error}")
+            return
+
+        if release is None:
+            reason = self.update_mgr.skip_reason
+            if reason == "interval":
+                self._log("[更新] 距上次检查不足 6 小时，跳过本次自动检查")
+                self.status_var.set(f"当前版本 v{current}")
+            elif reason == "disabled":
+                self._log("[更新] 自动更新检查已关闭（RAINEXAM_DISABLE_UPDATE_CHECK=1）")
+                self.status_var.set(f"当前版本 v{current}")
+            else:
+                self._log(f"[更新] 已是最新版本 v{current}")
+                self.status_var.set(f"已是最新版本 v{current}")
+                if not silent:
+                    messagebox.showinfo("检查更新", f"当前已是最新版本 v{current}")
+            return
+
+        self._pending_release = release
+        self._log(f"[更新] 发现新版本 v{release.version}（当前 v{current}）")
+        self.status_var.set(f"发现新版本 v{release.version}，点「检查更新」查看")
+
+        if silent and self.update_mgr.skipped:
+            # 用户之前选过「稍后再说」，只在状态栏提示，不重复弹窗
+            return
+        self._prompt_update(release)
+
+    def _prompt_update(self, release):
+        """弹窗询问是否下载更新"""
+        current = self.update_mgr.current_version
+        notes = plain_notes(release.notes) or "（本版本未提供更新说明）"
+        if self.update_mgr.can_self_update():
+            tail = "是否立即下载并自动更新？\n（下载完成后程序会自动重启）"
+        elif release.has_asset:
+            tail = "是否打开下载页面获取新版本？"
+        else:
+            tail = "是否打开 Release 页面查看？"
+
+        msg = (f"发现新版本 v{release.version}（当前 v{current}）\n\n"
+               f"更新内容：\n{notes}\n\n{tail}")
+        if messagebox.askyesno(f"发现新版本 v{release.version}", msg):
+            if self.update_mgr.can_self_update():
+                self._download_update(release)
+            else:
+                self._open_download_page(release)
+        else:
+            self.update_mgr.mark_skipped(release.version)
+            self._log(f"[更新] 已忽略 v{release.version}，下次启动不再提示该版本")
+            self.status_var.set(f"已忽略 v{release.version}（可点「检查更新」重新查看）")
+
+    def _open_download_page(self, release):
+        if not self.update_mgr.open_release_page(release):
+            messagebox.showinfo("下载地址",
+                                "打开浏览器失败，请手动访问：\n\n"
+                                f"{release.download_page() or 'https://github.com/' + self.update_mgr.repo + '/releases/latest'}")
+
+    def _download_update(self, release):
+        if self.update_mgr.can_self_update() and not self.update_mgr.update_dir_writable():
+            # 只读目录（例如装在 Program Files）：下载也换不掉，直接引导手动下载
+            self._log("[更新] 程序目录不可写，改为手动下载")
+            messagebox.showinfo(
+                "需要手动更新",
+                "当前程序所在目录不可写，无法自动替换。\n\n"
+                "请手动下载新版本并替换当前程序：")
+            self._open_download_page(release)
+            return
+
+        size = f"（{release.asset_size / 1048576:.1f} MB）" if release.asset_size else ""
+        self._log(f"[更新] 开始下载 {release.asset_name or 'RainExam.exe'}{size}")
+        self.status_var.set(f"正在下载 v{release.version}...")
+        self._downloading = True
+        self.update_btn.config(state="disabled")
+        threading.Thread(target=self._download_update_thread, args=(release,), daemon=True).start()
+
+    def _download_update_thread(self, release):
+        last_pct = {"value": -10}
+
+        def progress(done: int, total: int):
+            if not total:
+                return
+            pct = int(done * 100 / total)
+            if pct >= last_pct["value"] + 10 or pct >= 100:
+                last_pct["value"] = pct
+                self._post(lambda p=pct: self.status_var.set(
+                    f"正在下载 v{release.version}... {p}%"))
+
+        path = None
+        error = ""
+        try:
+            path = self.update_mgr.download(release, progress=progress)
+        except Exception as e:  # noqa: BLE001
+            error = str(e)
+        self._post(lambda: self._on_download_done(path, error, release))
+
+    def _on_download_done(self, path, error: str, release):
+        self._downloading = False
+        self.update_btn.config(state="normal")
+
+        if error or path is None:
+            self._log(f"[更新] 下载失败：{error}")
+            self.status_var.set("下载更新失败")
+            if messagebox.askyesno("下载失败",
+                                   f"下载更新失败：\n\n{error}\n\n是否打开下载页面手动下载？"):
+                self._open_download_page(release)
+            return
+
+        self._log(f"[更新] 已下载并通过校验：{path}")
+        self.status_var.set("更新已下载完成")
+
+        if not self.update_mgr.can_self_update():
+            messagebox.showinfo("下载完成", f"新版本已下载到：\n{path}")
+            self._open_download_page(release)
+            return
+
+        if self._running:
+            messagebox.showinfo("提示",
+                                "当前有任务正在运行。\n\n"
+                                f"新版本已下载到：\n{path}\n\n"
+                                "请等任务结束后再点「检查更新」完成更新。")
+            return
+
+        if not messagebox.askyesno("更新就绪",
+                                   "新版本已下载完成。\n\n是否立即重启程序以完成更新？"):
+            messagebox.showinfo("提示",
+                                f"新版本已下载到：\n{path}\n\n"
+                                "下次点「检查更新」可再次安装，也可手动替换当前程序。")
+            return
+
+        try:
+            self.update_mgr.install_and_restart(path)
+        except Exception as e:  # noqa: BLE001
+            self._log(f"[更新] 安装失败：{e}")
+            messagebox.showerror("更新失败", f"{e}\n\n可手动替换程序文件：\n{path}")
+            return
+
+        self._log("[更新] 正在退出并重启以完成更新...")
+        self.status_var.set("正在重启以完成更新...")
+        self.after(500, self.destroy)
+
     # ── 日志 ──
+
+    def _post(self, fn):
+        """从任意线程把操作排到主线程执行（tkinter 不是线程安全的）"""
+        self._ui_queue.put(fn)
 
     def _log(self, msg: str):
         self._log_queue.put(msg)
@@ -527,6 +798,15 @@ class App(tk.Tk):
                 self.log_text.config(state="disabled")
         except queue.Empty:
             pass
+
+        try:
+            while True:
+                self._ui_queue.get_nowait()()
+        except queue.Empty:
+            pass
+        except Exception as e:  # noqa: BLE001 - 单个回调出错不应影响后续
+            self._log_queue.put(f"[错误] 界面回调异常: {e}")
+
         self.after(100, self._poll_log_queue)
 
     def _clear_log(self):

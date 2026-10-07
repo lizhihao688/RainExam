@@ -27,6 +27,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller openai httpx pywebview
 
+      # ── 打包前先跑自动更新模块的单元测试（纯标准库，不联网）──
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      # ── 版本号必须比上一次发布更大，否则客户端不会提示更新 ──
+      - name: Ensure version is greater than latest release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW="${GITHUB_REF_NAME#v}"
+          if ! LATEST_RAW=$(gh release view --json tagName -q .tagName 2>/dev/null); then
+            echo "查询不到历史 Release（可能是首个版本），跳过版本递增检查"
+            exit 0
+          fi
+          LATEST="${LATEST_RAW#v}"
+          echo "本次版本: $NEW   最新已发布: $LATEST"
+          HIGHEST=$(printf '%s\n%s\n' "$LATEST" "$NEW" | sort -V | tail -n1)
+          if [ "$HIGHEST" = "$NEW" ] && [ "$NEW" != "$LATEST" ]; then
+            echo "✅ 版本号递增检查通过"
+          else
+            echo "::error::新版本 $NEW 必须大于最新已发布版本 $LATEST，否则已安装的用户不会收到更新提示"
+            exit 1
+          fi
+
+      # ── 把 tag（如 v2.0.2）写进 src/version.py，供程序内「检查更新」比对版本 ──
+      - name: Inject version from tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Building version: $VERSION"
+          printf '__version__ = "%s"\n' "$VERSION" > src/version.py
+          cat src/version.py
+
       - name: Build EXE with PyInstaller
         run: |
           pyinstaller RainExam.spec
@@ -41,12 +77,22 @@ jobs:
             exit 1
           }
 
+      # ── 生成 SHA256 校验文件，客户端自动更新时用它校验下载完整性 ──
+      - name: Generate SHA256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist/RainExam.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  RainExam.exe" | Out-File -Encoding ascii -NoNewline dist/RainExam.exe.sha256
+          Get-Content dist/RainExam.exe.sha256
+
       # ── 上传为 Artifact（方便调试下载，不依赖 tag）──
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
         with:
           name: RainExam-windows
-          path: dist/RainExam.exe
+          path: |
+            dist/RainExam.exe
+            dist/RainExam.exe.sha256
           retention-days: 30
 
       # ── 推送 tag 时自动创建 GitHub Release ──
@@ -58,6 +104,10 @@ jobs:
           body: |
             ## RainExam ${{ github.ref_name }}
 
+            > ℹ️ **关于自动更新**：从本版本开始，程序启动时会自动检查更新并提示一键下载。
+            > 已经装了**带更新功能的版本**的用户会收到提示；更早的版本没有该功能，
+            > 需要手动下载本页的 `RainExam.exe` 升级一次，之后即可自动更新。
+
             ---
 
             ## ⬇️ 下载方式
@@ -67,6 +117,7 @@ jobs:
             | 文件 | 说明 |
             |------|------|
             | ✅ **`RainExam.exe`** | **点这个下载！** Windows 可执行程序，双击运行 |
+            | ✅ `RainExam.exe.sha256` | 校验文件，用于确认下载完整（一般不需要） |
             | ❌ `Source code.zip` | 源代码压缩包，普通用户不需要 |
             | ❌ `Source code.tar.gz` | 源代码压缩包，普通用户不需要 |
 
@@ -91,7 +142,9 @@ jobs:
             ---
 
             > 详见 [提交记录](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }})
-          files: dist/RainExam.exe
+          files: |
+            dist/RainExam.exe
+            dist/RainExam.exe.sha256
           draft: false
           prerelease: false
         env:
